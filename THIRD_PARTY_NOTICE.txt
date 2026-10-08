@@ -1,0 +1,15 @@
+u3d2mesh
+
+The U3D arithmetic decoder, dynamic histogram, and CLOD base-mesh parser in
+scripts/u3d2mesh.py are an independent, functional re-implementation of the
+algorithms in Intel's U3D reference library (CIFXBitStreamX,
+IFXHistogramDynamic, CIFXAuthorCLODDecoder, CIFXLoadManager), which is
+licensed under the Apache License, Version 2.0, Copyright (c) Intel
+Corporation. The U3D format is standardised as ECMA-363.
+
+This project is a clean-room-style reimplementation for mesh recovery and does
+not include Intel's original source. See the Apache-2.0 license for terms.
+
+Source: https://github.com/svhss/u3d-mesh-extract
+Revision: 71c5f4428ae3bcff9c2521c4e00dd938a703a648
+Only the Histogram / BitStream arithmetic decoder is adapted.
