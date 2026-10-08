@@ -3,7 +3,10 @@
 import argparse
 import hashlib
 import json
+import shutil
 import struct
+import subprocess
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -309,7 +312,41 @@ class GLB:
             output.write(struct.pack('<I4s', len(self.binary), b'BIN\x00')); output.write(self.binary)
 
 
-def convert(source, destination, cache_dir=None):
+LEVELS = {'low': (0.5, 0.001), 'medium': (0.25, 0.005), 'high': (0.1, 0.01)}
+
+
+def lightweight_options(level='none', ratio=None, error=None, lock_border=False, merge_parts=False):
+    if level == 'none':
+        if ratio is not None or error is not None or lock_border or merge_parts:
+            raise ValueError('Lightweight parameters require --level low, medium, or high')
+        return None
+    if level not in LEVELS:
+        raise ValueError('Unknown lightweight level')
+    default_ratio, default_error = LEVELS[level]
+    ratio = default_ratio if ratio is None else ratio
+    error = default_error if error is None else error
+    if not np.isfinite(ratio) or not 0 < ratio <= 1:
+        raise ValueError('Ratio must be finite and greater than 0, up to 1')
+    if not np.isfinite(error) or not 0 <= error <= 1:
+        raise ValueError('Error must be finite and between 0 and 1')
+    return dict(level=level, ratio=ratio, error=error, lock_border=lock_border, merge_parts=merge_parts)
+
+
+def make_lightweight(source, destination, options):
+    node = shutil.which('node')
+    if not node:
+        raise ValueError('Lightweight conversion requires Node.js 22 or later and npm ci')
+    script = Path(__file__).with_name('lightweight.mjs')
+    result = subprocess.run([node, str(script), str(source), str(destination), json.dumps(options)],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError(f'Lightweight conversion failed (run npm ci): {result.stderr.strip()}')
+    return json.loads(result.stdout)
+
+
+def convert(source, destination, cache_dir=None, *, level='none', ratio=None, error=None,
+            lock_border=False, merge_parts=False):
+    options = lightweight_options(level, ratio, error, lock_border, merge_parts)
     raw = read_source(source)
     digest = hashlib.sha256(raw).hexdigest()
     scene = parse_scene(raw)
@@ -400,7 +437,27 @@ def convert(source, destination, cache_dir=None):
                   node_mapping='World transforms baked into flat occurrence nodes; original parent names in extras')
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    glb.save(destination)
+    if options:
+        with tempfile.TemporaryDirectory(prefix='.pdf-to-glb-', dir=destination.parent) as temporary:
+            original = Path(temporary) / 'original.glb'
+            candidate = Path(temporary) / 'lightweight.glb'
+            glb.save(original)
+            stats = make_lightweight(original, candidate, options)
+            report['lightweight'] = dict(**options, **stats, original_glb_bytes=original.stat().st_size,
+                                        original_dimensions_m=report['dimensions_m'],
+                                        original_glb_meshes=report['glb_meshes'],
+                                        original_visible_instances=report['visible_instances'],
+                                        original_materials=report['materials'])
+            report['triangles_in_scene'] = stats['output_triangles']
+            report['dimensions_m'] = stats['output_dimensions_m']
+            report['glb_meshes'] = stats['output_meshes']
+            report['visible_instances'] = stats['output_instances']
+            report['materials'] = stats['output_materials']
+            if merge_parts:
+                report['node_mapping'] = 'Components merged by material; individual component selection removed'
+            candidate.replace(destination)
+    else:
+        glb.save(destination)
     report['glb_bytes'] = destination.stat().st_size
     destination.with_suffix('.report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     return report
@@ -411,11 +468,17 @@ def main():
     parser.add_argument('input', type=Path)
     parser.add_argument('output', type=Path)
     parser.add_argument('--cache-dir', type=Path, help='Optional cache of decoded geometry for repeat conversions')
+    parser.add_argument('--level', choices=['none', *LEVELS], default='none', help='Lightweight level; default: none')
+    parser.add_argument('--ratio', type=float, help='Override target fraction of triangles to keep (0 < ratio <= 1)')
+    parser.add_argument('--error', type=float, help='Override relative mesh error limit (0 <= error <= 1)')
+    parser.add_argument('--lock-border', action='store_true', help='Preserve open mesh boundaries during simplification')
+    parser.add_argument('--merge-parts', action='store_true', help='Merge components by material; removes individual selection')
     args = parser.parse_args()
     if args.output.suffix.lower() != '.glb':
         parser.error('Output must have .glb extension')
     try:
-        report = convert(args.input, args.output, args.cache_dir)
+        report = convert(args.input, args.output, args.cache_dir, level=args.level,
+                         ratio=args.ratio, error=args.error, lock_border=args.lock_border, merge_parts=args.merge_parts)
     except (ValueError, IndexError, struct.error) as error:
         parser.exit(1, f'Conversion failed: {error}\n')
     print(json.dumps(report, ensure_ascii=False, indent=2))

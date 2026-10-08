@@ -8,3 +8,4 @@ htmlcov/
 *.glb
 *.report.json
 .DS_Store
+node_modules/
