@@ -75,6 +75,23 @@ def read_glb(path):
     return doc, binary
 
 
+def glb_worlds(doc):
+    from trimesh.transformations import quaternion_matrix
+    worlds = {}
+    def visit(index, parent):
+        node = doc['nodes'][index]
+        q = node.get('rotation', [0, 0, 0, 1])
+        matrix = quaternion_matrix([q[3], *q[:3]])
+        matrix[:3, :3] *= node.get('scale', [1, 1, 1])
+        matrix[:3, 3] = node.get('translation', [0, 0, 0])
+        worlds[index] = parent @ matrix
+        for child in node.get('children', []):
+            visit(child, worlds[index])
+    for index in doc['scenes'][doc.get('scene', 0)]['nodes']:
+        visit(index, np.eye(4))
+    return worlds
+
+
 def test_end_to_end_material_transform_instancing_and_cache(tmp_path):
     source = tmp_path / 'model.u3d'; source.write_bytes(fixture_bytes(opacity=.35))
     dest = tmp_path / 'nested/model.glb'
@@ -85,7 +102,7 @@ def test_end_to_end_material_transform_instancing_and_cache(tmp_path):
     assert report['dimensions_m'] == pytest.approx([3, 1, 0])
     assert len(doc['meshes']) == 1
     assert doc['nodes'][1]['mesh'] == doc['nodes'][2]['mesh']
-    assert doc['nodes'][2]['translation'][0] == pytest.approx(2)
+    assert glb_worlds(doc)[2][0, 3] == pytest.approx(2)
     assert 'translation' not in doc['nodes'][0]
     material = doc['materials'][0]
     assert material['pbrMetallicRoughness']['baseColorFactor'] == pytest.approx([1, 0, 0, .35])
@@ -219,6 +236,75 @@ def rewrite(raw, kind, transform):
             data = transform(data)
         result += block(bt, data)
     return result
+
+
+def grouped_fixture_bytes():
+    from trimesh.transformations import euler_matrix
+    raw = rewrite(fixture_bytes(opacity=.35), c.MODEL,
+                  lambda d: d[:len(text('part0')) + 4] + text('subassembly') + d[len(text('part0')) + 6:])
+    top = euler_matrix(0, 0, np.pi / 2); top[:3, :3] *= 2; top[:3, 3] = [4000, 5000, 6000]
+    sub = euler_matrix(np.pi / 6, 0, 0); sub[:3, :3] *= [1, .8, 1.2]; sub[:3, 3] = [0, 3000, 0]
+    def group(name, parent, matrix):
+        return block(c.GROUP, text(name) + u32(1) + text(parent) + f32(*matrix.T.reshape(-1)))
+    # Child declarations precede parents to exercise order-independent construction.
+    return raw + group('subassembly', 'assembly', sub) + group('assembly', '', top) + group('empty', 'assembly', np.eye(4))
+
+
+@pytest.mark.parametrize('level', ['none', 'low', 'medium', 'high'])
+def test_assembly_hierarchy_and_world_placement_end_to_end(tmp_path, level):
+    source = tmp_path / 'assembly.u3d'; source.write_bytes(grouped_fixture_bytes())
+    destination = tmp_path / 'model.glb'
+    report = c.convert(source, destination, level=level)
+    doc, _ = read_glb(destination)
+    names = {node['name']: i for i, node in enumerate(doc['nodes'])}
+    assert set(names) == {'Model', 'assembly', 'subassembly', 'empty', 'part0', 'part1'}
+    assert doc['nodes'][names['Model']]['children'] == [names['assembly']]
+    assert set(doc['nodes'][names['assembly']]['children']) == {names['subassembly'], names['empty']}
+    assert set(doc['nodes'][names['subassembly']]['children']) == {names['part0'], names['part1']}
+    assert all('mesh' not in doc['nodes'][names[n]] for n in ('assembly', 'subassembly', 'empty'))
+    assert report['group_nodes'] == 3
+    assert report['visible_instances'] == 2
+    scene = c.parse_scene(source.read_bytes())
+    original = c.world_matrices(scene['nodes'])
+    worlds = glb_worlds(doc)
+    for name, matrix in original.items():
+        expected = matrix.copy(); expected[:3] *= scene['units']
+        assert worlds[names[name]] == pytest.approx(expected, abs=1e-9)
+    assert doc['nodes'][names['part0']]['mesh'] == doc['nodes'][names['part1']]['mesh']
+
+
+@pytest.mark.parametrize('failure,message', [('missing', 'Missing parent'), ('cycle', 'Cycle')])
+def test_invalid_assembly_hierarchy_has_no_output(tmp_path, failure, message):
+    raw = grouped_fixture_bytes()
+    raw = rewrite(raw, c.GROUP, lambda d: d.replace(text('assembly'), text('missing' if failure == 'missing' else 'subassembly'))
+                  if d.startswith(text('subassembly')) else d)
+    source = tmp_path / 'invalid.u3d'; source.write_bytes(raw)
+    with pytest.raises(ValueError, match=message):
+        c.convert(source, tmp_path / 'invalid.glb')
+    assert not (tmp_path / 'invalid.glb').exists()
+
+
+def test_lightweight_keeps_small_local_offsets_under_large_parent_scale(tmp_path):
+    raw = grouped_fixture_bytes()
+    raw = rewrite(raw, c.GROUP, lambda d: text('subassembly') + u32(1) + text('assembly') +
+                  f32(*np.diag([1000, 1000, 1000, 1]).T.reshape(-1))
+                  if d.startswith(text('subassembly')) else d)
+    def offset(data):
+        prefix = text('part0') if data.startswith(text('part0')) else text('part1')
+        matrix = np.eye(4); matrix[0, 3] = 6.5e-6
+        return prefix + u32(1) + text('subassembly') + f32(*matrix.T.reshape(-1)) + text('mesh') + u32(3)
+    raw = rewrite(raw, c.MODEL, offset)
+    source = tmp_path / 'tiny.u3d'; source.write_bytes(raw)
+    c.convert(source, tmp_path / 'original.glb')
+    c.convert(source, tmp_path / 'light.glb', level='low')
+    original, _ = read_glb(tmp_path / 'original.glb'); light, _ = read_glb(tmp_path / 'light.glb')
+    names = {n['name']: i for i, n in enumerate(original['nodes'])}
+    light_names = {n['name']: i for i, n in enumerate(light['nodes'])}
+    original_worlds = glb_worlds(original); light_worlds = glb_worlds(light)
+    for name, index in names.items():
+        assert light_worlds[light_names[name]] == pytest.approx(original_worlds[index], abs=1e-12)
+        for field in ('translation', 'rotation', 'scale'):
+            assert light['nodes'][light_names[name]].get(field) == original['nodes'][index].get(field)
 
 
 @pytest.mark.parametrize('kind,transform,message', [

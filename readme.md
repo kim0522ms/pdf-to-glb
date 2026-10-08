@@ -18,7 +18,10 @@ python -m pip install -r requirements.txt
 python pdf_to_glb.py input.pdf output.glb
 ```
 
-Also accepts `.u3d` files. Preserves geometry, colors, component placement, and source coordinates.
+Also accepts `.u3d` files. Preserves geometry, colors, component placement, source
+coordinates, and assembly hierarchy. Source groups and components become GLB nodes
+with their original names, parent-child relationships, and local transforms.
+Unit conversion is applied at the `Model` root.
 Colors are assumed to be sRGB. Gloss and reflections are approximated with PBR materials.
 
 ## Lightweight conversion
@@ -49,7 +52,7 @@ python pdf_to_glb.py input.pdf output.glb --level medium --ratio 0.3 --error 0.0
   It is not an absolute distance in metres. A smaller value restricts changes.
 - `--lock-border`: preserve open mesh boundaries. This can limit simplification.
 - `--merge-parts`: merge components by material to reduce separate objects. Removes
-  individual component selection and names. Shared instances are expanded, so the
+  assembly hierarchy, individual component selection, and names. Shared instances are expanded, so the
   file can become larger. Disabled by default.
 - `--cache-dir PATH`: cache decoded source geometry for repeated conversions.
 
@@ -58,7 +61,7 @@ before reaching the target because of the error limit or mesh topology. At least
 triangle is retained per primitive. Internal parts are included.
 
 Without `--merge-parts`, lightweight output retains material colors, opacity, component names,
-placement, and shared mesh instances. It uses standard GLB buffers without Draco or
+assembly hierarchy, placement, and shared mesh instances. It uses standard GLB buffers without Draco or
 meshopt compression. Face normals are recalculated after simplification. Simplification
 changes geometry and can affect surface appearance.
 The adjacent `.report.json` records the options, original and output triangle counts,

@@ -1,5 +1,5 @@
 import {Logger, NodeIO, PropertyType} from '@gltf-transform/core';
-import {getBounds, join, normals, prune, simplifyPrimitive, weld} from '@gltf-transform/functions';
+import {flatten, getBounds, join, normals, prune, simplifyPrimitive, weld} from '@gltf-transform/functions';
 import {MeshoptSimplifier} from 'meshoptimizer';
 import {pathToFileURL} from 'node:url';
 
@@ -42,7 +42,7 @@ export async function makeLightweight(source, destination, options) {
     }
   }
   await document.transform(weld());
-  if (options.merge_parts) await document.transform(join({keepNamed: false}));
+  if (options.merge_parts) await document.transform(flatten(), join({keepNamed: false}));
   // Keep occurrence nodes, names, transforms, materials, and shared meshes.
   await document.transform(prune({propertyTypes: [PropertyType.ACCESSOR],
     keepAttributes: true, keepIndices: true}));

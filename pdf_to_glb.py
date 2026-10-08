@@ -344,6 +344,24 @@ def make_lightweight(source, destination, options):
     return json.loads(result.stdout)
 
 
+def preserve_local_transforms(original, destination):
+    # The optimizer's writer omits near-identity TRS values. Parent scales can
+    # amplify those small local offsets, so restore every source TRS exactly.
+    data = destination.read_bytes()
+    json_size = struct.unpack_from('<I', data, 12)[0]
+    glb = GLB()
+    glb.doc = json.loads(data[20:20 + json_size])
+    binary_size = glb.doc['buffers'][0]['byteLength']
+    glb.binary = bytearray(data[28 + json_size:28 + json_size + binary_size])
+    originals = {node['name']: node for node in original.doc['nodes']}
+    for node in glb.doc['nodes']:
+        for field in ('translation', 'rotation', 'scale'):
+            node.pop(field, None)
+            if field in originals[node['name']]:
+                node[field] = originals[node['name']][field]
+    glb.save(destination)
+
+
 def convert(source, destination, cache_dir=None, *, level='none', ratio=None, error=None,
             lock_border=False, merge_parts=False):
     options = lightweight_options(level, ratio, error, lock_border, merge_parts)
@@ -365,6 +383,15 @@ def convert(source, destination, cache_dir=None, *, level='none', ratio=None, er
             material['emissiveFactor'] = linear_color(mat['emissive'])
         material_ids[name] = len(glb.doc['materials'])
         glb.doc['materials'].append(material)
+    if scene['units'] != 1:
+        glb.doc['nodes'][0]['scale'] = [scene['units']] * 3
+    node_ids = {name: i + 1 for i, name in enumerate(scene['nodes'])}
+    for name, node in scene['nodes'].items():
+        glb.doc['nodes'].append(dict(name=name, **node_trs(node['matrix']),
+                                    extras={'u3dParent': node['parent']}))
+    for name, node in scene['nodes'].items():
+        parent = node_ids[node['parent']] if node['parent'] else 0
+        glb.doc['nodes'][parent].setdefault('children', []).append(node_ids[name])
     geometry = {}
     for i, (name, declaration) in enumerate(scene['declarations'].items()):
         cache = Path(cache_dir) / digest / f'{i}.npz' if cache_dir else None
@@ -422,19 +449,19 @@ def convert(source, destination, cache_dir=None, *, level='none', ratio=None, er
         bounds[0] = np.minimum(bounds[0], transformed.min(axis=0))
         bounds[1] = np.maximum(bounds[1], transformed.max(axis=0))
         triangles += len(faces)
-        glb.doc['nodes'][0]['children'].append(len(glb.doc['nodes']))
-        glb.doc['nodes'].append(dict(name=name, mesh=mesh_ids[key], **node_trs(matrix),
-                                    extras={'u3dParent': node['parent']}))
+        glb.doc['nodes'][node_ids[name]]['mesh'] = mesh_ids[key]
     if not glb.doc['meshes']:
         raise Unsupported('No visible model geometry')
     report = dict(source=str(Path(source).resolve()), u3d_sha256=digest,
-                  geometry_resources=len(geometry), visible_instances=len(glb.doc['nodes']) - 1,
+                  geometry_resources=len(geometry),
+                  visible_instances=sum('mesh' in node for node in glb.doc['nodes']),
+                  group_nodes=sum(not node['resource'] for node in scene['nodes'].values()),
                   glb_meshes=len(glb.doc['meshes']), materials=len(material_ids),
                   triangles_in_scene=triangles, units='metres', coordinate_system='Source origin and axes preserved',
                   dimensions_m=(bounds[1] - bounds[0]).tolist(),
                   color_mapping='U3D diffuse sRGB assumed -> glTF linear RGB',
                   material_mapping='Diffuse/emissive/opacity preserved; Phong -> PBR appearance approximate',
-                  node_mapping='World transforms baked into flat occurrence nodes; original parent names in extras')
+                  node_mapping='Source assembly hierarchy and local transforms preserved; unit scale on Model root')
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if options:
@@ -443,6 +470,8 @@ def convert(source, destination, cache_dir=None, *, level='none', ratio=None, er
             candidate = Path(temporary) / 'lightweight.glb'
             glb.save(original)
             stats = make_lightweight(original, candidate, options)
+            if not merge_parts:
+                preserve_local_transforms(glb, candidate)
             report['lightweight'] = dict(**options, **stats, original_glb_bytes=original.stat().st_size,
                                         original_dimensions_m=report['dimensions_m'],
                                         original_glb_meshes=report['glb_meshes'],
@@ -454,6 +483,7 @@ def convert(source, destination, cache_dir=None, *, level='none', ratio=None, er
             report['visible_instances'] = stats['output_instances']
             report['materials'] = stats['output_materials']
             if merge_parts:
+                report['group_nodes'] = 0
                 report['node_mapping'] = 'Components merged by material; individual component selection removed'
             candidate.replace(destination)
     else:

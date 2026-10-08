@@ -5,7 +5,7 @@ import sys
 import pytest
 
 import pdf_to_glb as c
-from test_converter import fixture_bytes, read_glb
+from test_converter import fixture_bytes, glb_worlds, grouped_fixture_bytes, read_glb
 
 
 @pytest.mark.parametrize('level,ratio,error', [('low', .5, .001), ('medium', .25, .005), ('high', .1, .01)])
@@ -37,7 +37,7 @@ def test_default_unchanged_and_small_parts_retained(tmp_path):
     assert report['lightweight']['original_triangles'] == report['lightweight']['output_triangles'] == 2
     assert report['triangles_in_scene'] == 2
     assert doc['nodes'][1]['mesh'] == doc['nodes'][2]['mesh']
-    assert doc['nodes'][2]['translation'] == [2, 0, 0]
+    assert glb_worlds(doc)[2][:3, 3] == pytest.approx([2, 0, 0])
     assert doc['materials'][0]['pbrMetallicRoughness']['baseColorFactor'] == pytest.approx([1, 0, 0, .35])
     assert json.loads(output.with_suffix('.report.json').read_text()) == report
 
@@ -75,3 +75,14 @@ def test_cli_options_and_failure(tmp_path):
     assert report['lightweight']['output_instances'] == 1
     assert report['visible_instances'] == report['glb_meshes'] == 1
     assert 'selection removed' in report['node_mapping']
+
+
+def test_merge_parts_explicitly_flattens_assembly_without_moving_geometry(tmp_path):
+    source = tmp_path / 'input.u3d'; source.write_bytes(grouped_fixture_bytes())
+    baseline = c.convert(source, tmp_path / 'original.glb')
+    output = tmp_path / 'merged.glb'
+    report = c.convert(source, output, level='high', merge_parts=True)
+    assert report['triangles_in_scene'] == baseline['triangles_in_scene']
+    assert report['dimensions_m'] == pytest.approx(baseline['dimensions_m'], abs=1e-6)
+    assert report['visible_instances'] == 1
+    assert report['group_nodes'] == 0
