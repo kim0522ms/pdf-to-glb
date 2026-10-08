@@ -13,3 +13,8 @@ not include Intel's original source. See the Apache-2.0 license for terms.
 Source: https://github.com/svhss/u3d-mesh-extract
 Revision: 71c5f4428ae3bcff9c2521c4e00dd938a703a648
 Only the Histogram / BitStream arithmetic decoder is adapted.
+
+Licensing in this repository:
+Project-authored code and documentation are licensed under MIT (see LICENSE).
+The adapted decoder in u3d_codec.py retains the notices above and the
+Apache-2.0 terms in LICENSE-APACHE-2.0.txt.
